@@ -1,7 +1,5 @@
-// === START PART 1 ===
-
 /**
- * FTT Signal Worker v6.0 — Multi-Timeframe Binary Trading (Forex + Crypto)
+ * FTT Signal Worker v6.1 — Multi-Timeframe Binary Trading (Forex + Crypto)
  * FIXED VERSION — All bugs resolved
  *
  * FIXES APPLIED:
@@ -17,6 +15,11 @@
  * 10. Rate limiter KV error handling improved
  * 11. fetchCandles() AbortSignal compatibility fix
  * 12. All template literal escaping fixed
+ * 13. THREE_BLACK_CROWS double-push typo fixed
+ * 14. [v6.1] DURATION_CONFIG reduced — binary-appropriate expiry (1min→max 5m, 5min→max 20m, 15min→max 30m)
+ * 15. [v6.1] Score-based dur+1/dur+2 bonus removed — expiry no longer inflated by signal score
+ * 16. [v6.1] HTF conflict → hard NO_TRADE block (was 0.7x penalty only)
+ * 17. [v6.1] MIXED timeframe alignment → NO_TRADE (was generating directional signal)
  */
 
 // ============================================
@@ -125,16 +128,17 @@ const VOLATILITY_THRESHOLDS = {
   },
 };
 
+// [v6.1] Reduced for binary trading — 1-2 candle expiry is ideal
 const DURATION_CONFIG = {
   FOREX: {
-    '1min': { base: 5, min: 2, max: 15 },
-    '5min': { base: 3, min: 1, max: 8 },
-    '15min': { base: 2, min: 1, max: 4 },
+    '1min':  { base: 2, min: 1, max: 5 },   // was base:5, max:15 → now max 5 min
+    '5min':  { base: 2, min: 1, max: 4 },   // was base:3, max:8  → now max 20 min
+    '15min': { base: 1, min: 1, max: 2 },   // was base:2, max:4  → now max 30 min
   },
   CRYPTO: {
-    '1min': { base: 4, min: 1, max: 12 },
-    '5min': { base: 3, min: 1, max: 6 },
-    '15min': { base: 2, min: 1, max: 4 },
+    '1min':  { base: 2, min: 1, max: 4 },   // was base:4, max:12 → now max 4 min
+    '5min':  { base: 2, min: 1, max: 3 },   // was base:3, max:6  → now max 15 min
+    '15min': { base: 1, min: 1, max: 2 },   // was base:2, max:4  → now max 30 min
   },
 };
 
@@ -324,14 +328,13 @@ async function checkRateLimit(request, env) {
 }
 
 // ============================================
-// INPUT SANITIZATION — FIX #1: Regex patterns
+// INPUT SANITIZATION
 // ============================================
 
 function sanitizePair(input) {
   if (!input || typeof input !== 'string') return null;
   const c = input.replace(/[^A-Za-z/]/g, '').toUpperCase();
 
-  // FIX: Proper regex for XXX/YYY format
   const slashPattern = /^[A-Z]{3}\/[A-Z]{3}$/;
   if (slashPattern.test(c)) {
     const parts = c.split('/');
@@ -342,7 +345,6 @@ function sanitizePair(input) {
     }
   }
 
-  // FIX: Proper regex for XXXYYY format (6 letters, no slash)
   const noSlashPattern = /^[A-Z]{6}$/;
   if (noSlashPattern.test(c)) {
     const b = c.slice(0, 3);
@@ -352,7 +354,6 @@ function sanitizePair(input) {
     }
   }
 
-  // Crypto with slash
   if (c.includes('/')) {
     const parts = c.split('/');
     if (parts.length === 2) {
@@ -364,7 +365,6 @@ function sanitizePair(input) {
     }
   }
 
-  // Crypto without slash
   for (const base of CRYPTO_BASES) {
     if (c.startsWith(base)) {
       const quote = c.slice(base.length);
@@ -377,7 +377,6 @@ function sanitizePair(input) {
   return null;
 }
 
-// FIX #2: Null safety for getAssetType
 function getAssetType(pair) {
   if (!pair || typeof pair !== 'string') return ASSET_TYPE.FOREX;
   const parts = pair.split('/');
@@ -497,7 +496,7 @@ function handleHealth(env) {
 
   return jsonResponse({
     status: 'healthy',
-    version: '6.0.0-fixed',
+    version: '6.1.0',
     timestamp: new Date().toISOString(),
     apiKeys: { configured: keyCount, status: keyCount > 0 ? 'ready' : 'NO KEYS' },
     bindings: {
@@ -530,7 +529,6 @@ function handleHealth(env) {
   });
 }
 
-// FIX #3: handlePairs() broken format array
 function handlePairs() {
   const majorBases = ['EUR', 'GBP', 'AUD', 'NZD', 'USD', 'CAD', 'CHF', 'JPY'];
   const majorPairs = [];
@@ -583,8 +581,6 @@ function handlePairs() {
     },
   });
 }
-
-// === START PART 2 ===
 
 // ============================================
 // SIGNAL HANDLER
@@ -736,7 +732,7 @@ async function fetchCandlesWithCache(pair, tf, limit, env, ctx) {
 }
 
 // ============================================
-// DATA FETCHING — FIX #5: AbortSignal compatibility
+// DATA FETCHING
 // ============================================
 
 async function fetchCandles(pair, tf, limit, env) {
@@ -759,7 +755,6 @@ async function fetchCandles(pair, tf, limit, env) {
       u.searchParams.set('apikey', apiKeys[ki]);
       u.searchParams.set('format', 'JSON');
 
-      // FIX: AbortSignal.timeout may not exist in all runtimes
       const controller = new AbortController();
       const timeoutId = setTimeout(function () { controller.abort(); }, CONFIG.REQUEST_TIMEOUT);
 
@@ -952,7 +947,6 @@ function calculateBollingerBands(data, period, mult) {
   return { upper: u, middle: m, lower: l, bandwidth: bw, percentB: pb };
 }
 
-// FIX #6: Stochastic — handle null values in SMA input
 function calculateStochastic(candles, kP, sK, sD) {
   if (!kP) kP = 14;
   if (!sK) sK = 3;
@@ -972,7 +966,6 @@ function calculateStochastic(candles, kP, sK, sD) {
     rawK.push(rng > 0 ? ((candles[i].close - lo) / rng) * 100 : 50);
   }
 
-  // FIX: Only pass non-null values for SMA, then re-align
   const validRawK = [];
   const validIdxK = [];
   for (let i = 0; i < rawK.length; i++) {
@@ -1170,7 +1163,10 @@ function calculatePivotPoints(candles) {
   };
 }
 
-// FIX #7: Division by zero protection in patterns
+// ============================================
+// CANDLESTICK PATTERNS — FIX #13: THREE_BLACK_CROWS double-push typo fixed
+// ============================================
+
 function detectCandlestickPatterns(candles) {
   const patterns = [];
   if (!candles || candles.length < 3) return patterns;
@@ -1222,8 +1218,9 @@ function detectCandlestickPatterns(candles) {
   if (b2 > 0 && b1 > 0 && b0 > 0 && c1.close > c2.close && c0.close > c1.close && bp0 > 0.5 && bp1 > 0.5) {
     patterns.push({ name: 'THREE_WHITE_SOLDIERS', direction: 'BUY', strength: 2.0 });
   }
+  // FIX #13: was `patterns.pushpatterns.push(...)` — corrected to single push
   if (b2 < 0 && b1 < 0 && b0 < 0 && c1.close < c2.close && c0.close < c1.close && bp0 > 0.5 && bp1 > 0.5) {
-    patterns.pushpatterns.push({ name: 'THREE_BLACK_CROWS', direction: 'SELL', strength: 2.0 });
+    patterns.push({ name: 'THREE_BLACK_CROWS', direction: 'SELL', strength: 2.0 });
   }
 
   return patterns;
@@ -1398,7 +1395,7 @@ function calculateAllIndicators(candles) {
 }
 
 // ============================================
-// SAFE VALUE HELPERS — FIX #8: safeLastTwo logic
+// SAFE VALUE HELPERS
 // ============================================
 
 function safeLastValue(arr) {
@@ -1469,11 +1466,8 @@ function calculateCandleDuration(indicators, direction, candles, timeframe, asse
   const vt = VOLATILITY_THRESHOLDS[assetType] || VOLATILITY_THRESHOLDS.FOREX;
   let dur = cfg.base;
 
-  const signalScore = direction === 'BUY' ? (score && score.up ? score.up : 0) :
-    direction === 'SELL' ? (score && score.down ? score.down : 0) : 0;
-  if (signalScore >= 8) dur += 2;
-  else if (signalScore >= 5) dur += 1;
-  else if (signalScore < 2) dur -= 1;
+  // [v6.1] Score-based bonus REMOVED — was inflating expiry unnecessarily
+  // signalScore >= 8 → dur+2 and signalScore >= 5 → dur+1 removed
 
   const rsi = safeLastValue(indicators.rsi);
   if (rsi !== null) {
@@ -1607,8 +1601,6 @@ function jsonResponse(data, status) {
   });
 }
 
-// === START PART 3 ===
-
 // ============================================
 // BUILD MULTI-TIMEFRAME SIGNAL (v6.0)
 // ============================================
@@ -1733,13 +1725,21 @@ function buildMultiTimeframeSignal(candleData, pair, assetType, session, exotic)
   }
 
   // Higher-TF alignment bonus/penalty
-  if (higherTFTrend !== null && finalDirection === higherTFTrend) {
+  // [v6.1] HTF CONFLICT → HARD NO_TRADE BLOCK (was -10 confidence penalty only)
+  if (higherTFTrend !== null && finalDirection !== 'NO_TRADE' && finalDirection !== higherTFTrend) {
+    finalDirection = 'NO_TRADE';
+    confidence = 0;
+  } else if (higherTFTrend !== null && finalDirection === higherTFTrend) {
     confidence = Math.min(99, confidence + 5);
-  } else if (higherTFTrend !== null && finalDirection !== 'NO_TRADE' && finalDirection !== higherTFTrend) {
-    confidence = Math.max(30, confidence - 10);
   }
 
   confidence = Math.min(99, confidence + alignmentBonus);
+
+  // [v6.1] MIXED alignment → NO_TRADE (was generating directional signal in conflicted state)
+  if (alignment === 'MIXED') {
+    finalDirection = 'NO_TRADE';
+    confidence = 0;
+  }
 
   // Session quality adjustment
   if (assetType === ASSET_TYPE.FOREX) {
@@ -1822,7 +1822,7 @@ function buildMultiTimeframeSignal(candleData, pair, assetType, session, exotic)
     },
     averageConfluence: Math.round(avgConf * 10) / 10,
     timeframeAnalysis: tfResults,
-    method: 'WEIGHTED_MULTI_TF_v6.0',
+    method: 'WEIGHTED_MULTI_TF_v6.1',
     generatedAt: now.toISOString(),
   };
 }
@@ -1881,7 +1881,7 @@ function findBestTimeframe(tfResults, finalDirection) {
 }
 
 // ============================================
-// TIMEFRAME ANALYSIS v6.0 (CONTEXT-AWARE + WEIGHTED)
+// TIMEFRAME ANALYSIS v6.0
 // ============================================
 
 function analyzeTimeframe(indicators, candles, timeframe, assetType, higherTFTrend) {
@@ -2143,7 +2143,8 @@ function analyzeTimeframe(indicators, candles, timeframe, assetType, higherTFTre
         aD *= 0.7;
       }
     }
-    diCross = detectDICrossover(indicators.adx);    if (diCross) {
+    diCross = detectDICrossover(indicators.adx);
+    if (diCross) {
       if (diCross.direction === 'BUY') aU += diCross.strength;
       else if (diCross.direction === 'SELL') aD += diCross.strength;
     }
